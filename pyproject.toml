@@ -9,6 +9,13 @@ dependencies = [
     "requests>=2.33.1",
 ]
 
+[dependency-groups]
+dev = [
+    "pre-commit",
+    "ruff",
+    "mypy",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
