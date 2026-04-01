@@ -1,7 +1,3 @@
-import sys
-import json
-import requests
-from difflib import SequenceMatcher
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -16,59 +12,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
 )
 from PySide6.QtGui import QStandardItemModel, QStandardItem
-from PySide6.QtCore import Qt, QSortFilterProxyModel
-
-
-class FuzzyFilterProxyModel(QSortFilterProxyModel):
-    def __init__(self):
-        super().__init__()
-        self.query = ""
-
-    def setFilterText(self, text):
-        self.query = text.lower()
-        self.invalidateFilter()
-
-    def fuzzy_match(self, text, query):
-        if not query:
-            return True
-
-        text = text.lower()
-
-        if query in text:
-            return True
-
-        ratio = SequenceMatcher(None, query, text).ratio()
-        return ratio > 0.5
-
-    def filterAcceptsRow(self, source_row, source_parent):
-        if not self.query:
-            return True
-
-        model = self.sourceModel()
-
-        for col in range(model.columnCount()):
-            index = model.index(source_row, col, source_parent)
-            data = str(model.data(index))
-
-            if self.fuzzy_match(data, self.query):
-                return True
-
-        return False
-
-
-class Database:
-    def __init__(self):
-        with open("client/config.json", "r") as config_file:
-            config = json.load(config_file)
-        self.api_url = f"{str(config['api_url'])}:{str(config['api_port'])}"
-        print(f"Connecting to {self.api_url}")
-
-    def fetch_data(self):
-
-        response = requests.get(url=self.api_url + "/entities")
-        data = response.json()
-
-        return data
+from data_handler.api_handler import api_handler
+from filters.fuzzyfilter import FuzzyFilterProxyModel
 
 
 class MainWindow(QMainWindow):
@@ -77,7 +22,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("ATLAS Client")
         self.resize(1000, 600)
 
-        self.db = Database()
+        self.db = api_handler()
 
         self.setStyleSheet(self.dark_style())
 
@@ -205,10 +150,3 @@ class MainWindow(QMainWindow):
             border: none;
         }
         """
-
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
