@@ -1,17 +1,10 @@
-
 from PySide6.QtWidgets import (
-    QApplication,
-    QMainWindow,
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QTableView,
-    QPushButton,
-    QLabel,
-    QFrame,
-    QLineEdit,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QTableView, QPushButton, QLabel, QFrame, QLineEdit, QMenu
 )
 from PySide6.QtGui import QStandardItemModel, QStandardItem
+from PySide6.QtCore import Qt, QSettings
+
 from data_handler.api_handler import api_handler
 from filters.fuzzyfilter import FuzzyFilterProxyModel
 
@@ -23,7 +16,6 @@ class MainWindow(QMainWindow):
         self.resize(1000, 600)
 
         self.db = api_handler()
-
         self.setStyleSheet(self.dark_style())
 
         main_widget = QWidget()
@@ -38,6 +30,47 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(main_widget)
 
         self.load_data()
+
+        self.header = self.table.horizontalHeader()
+        self.header.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.header.customContextMenuRequested.connect(self.show_header_menu)
+
+    # ---------- TABLE STATE ----------
+
+    def save_table_state(self):
+        settings = QSettings("MyApp", "AtlasClient")
+        settings.setValue("header_state", self.header.saveState())
+
+    def load_table_state(self):
+        settings = QSettings("MyApp", "AtlasClient")
+        state = settings.value("header_state")
+        if state:
+            self.header.restoreState(state)
+
+    def closeEvent(self, event):
+        self.save_table_state()
+        super().closeEvent(event)
+
+    # ---------- HEADER MENU ----------
+
+    def show_header_menu(self, pos):
+        menu = QMenu(self)
+
+        for i, attr in enumerate(self.ATTRIBUTES):
+            action = menu.addAction(attr)
+            action.setCheckable(True)
+            action.setChecked(not self.table.isColumnHidden(i))
+
+            action.triggered.connect(
+                lambda checked, col=i: self.toggle_column(col, checked)
+            )
+
+        menu.exec(self.header.mapToGlobal(pos))
+
+    def toggle_column(self, column, visible):
+        self.table.setColumnHidden(column, not visible)
+
+    # ---------- UI ----------
 
     def create_sidebar(self):
         frame = QFrame()
@@ -79,27 +112,35 @@ class MainWindow(QMainWindow):
 
         return frame
 
+    # ---------- DATA ----------
+
     def load_data(self):
         data = self.db.fetch_data()
 
-        ATTRIBUTES = ["ID", "NAME", "Status", "IP"]
+        self.ATTRIBUTES = ["ID", "NAME", "Status", "IP"]
 
         self.model = QStandardItemModel()
-        self.model.setHorizontalHeaderLabels(ATTRIBUTES)
+        self.model.setHorizontalHeaderLabels(self.ATTRIBUTES)
 
-        print(data)
         for entity in data["data"]:
-            items = [QStandardItem(str(entity.get(attr, ""))) for attr in ATTRIBUTES]
+            items = [QStandardItem(str(entity.get(attr, ""))) for attr in self.ATTRIBUTES]
             self.model.appendRow(items)
 
         self.proxy = FuzzyFilterProxyModel()
         self.proxy.setSourceModel(self.model)
 
         self.table.setModel(self.proxy)
-        self.table.horizontalHeader().setStretchLastSection(True)
+
+        self.header = self.table.horizontalHeader()
+        self.header.setStretchLastSection(True)
+        self.header.setSectionsMovable(True)  # drag columns
+
+        self.load_table_state()
 
     def on_search(self, text):
         self.proxy.setFilterText(text)
+
+    # ---------- STYLE ----------
 
     def dark_style(self):
         return """
