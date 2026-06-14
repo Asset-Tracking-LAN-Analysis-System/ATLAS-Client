@@ -402,6 +402,11 @@ class DeviceNode(QGraphicsEllipseItem):
             self.set_subnet(subnet_edit.text().strip() or None)
             self.set_description(description_edit.text().strip() or None)
             self.set_ports(ports_edit.value())
+            try:
+                if getattr(self.scene(), 'history_callback', None):
+                    self.scene().history_callback()
+            except Exception:
+                pass
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemPositionHasChanged:
@@ -474,6 +479,11 @@ class DeviceNode(QGraphicsEllipseItem):
                 self.set_description(e.get('description'))
                 self.set_ports(e.get('ports', 0))
                 self.source_id = e.get('id')
+                try:
+                    if getattr(self.scene(), 'history_callback', None):
+                        self.scene().history_callback()
+                except Exception:
+                    pass
         elif act == refresh:
             self.refresh_from_db()
         elif act == edit:
@@ -487,7 +497,7 @@ class DeviceNode(QGraphicsEllipseItem):
 class NetworkScene(QGraphicsScene):
     def __init__(self):
         super().__init__()
-        self.setBackgroundBrush(QColor('#0f172a'))
+        self.setBackgroundBrush(QColor('#13222f'))
         self.nodes = []
         self.connections = []
         self._connecting = None  # (node, port_idx, port_item)
@@ -527,6 +537,11 @@ class NetworkScene(QGraphicsScene):
         node = DeviceNode(dtype, pos.x(), pos.y(), ports=48 if 'switch' in dtype.lower() else 4, node_id=node_id)
         self.addItem(node)
         self.nodes.append(node)
+        try:
+            if getattr(self, 'history_callback', None):
+                self.history_callback()
+        except Exception:
+            pass
         return node
 
     def contextMenuEvent(self, event):
@@ -585,22 +600,36 @@ class NetworkScene(QGraphicsScene):
         if start_item:
             start_item.set_connected(True)
         self._connecting = None
+        try:
+            if getattr(self, 'history_callback', None):
+                self.history_callback()
+        except Exception:
+            pass
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Network Planner')
-        self.resize(1200, 800)
+        self.resize(1200, 820)
         self.scene = NetworkScene()
+        self.scene.history_callback = self.push_history_state
+        self._history = []
+        self._history_index = -1
+        self._history_suppress = False
 
         container = QWidget()
         layout = QHBoxLayout(container)
 
         sidebar = QWidget()
+        sidebar.setObjectName('sidebar')
+        sidebar.setFixedWidth(220)
         s_layout = QVBoxLayout(sidebar)
-        s_layout.setContentsMargins(6, 6, 6, 6)
-        s_layout.addWidget(QLabel('Devices'))
+        s_layout.setContentsMargins(12, 12, 12, 12)
+        s_layout.setSpacing(12)
+        title = QLabel('Devices')
+        title.setStyleSheet('font-size: 16px; font-weight: bold; color: #f8fafc;')
+        s_layout.addWidget(title)
 
         self.device_list = QListWidget()
         for t in ['Router', 'Switch', 'Server', 'Firewall']:
@@ -625,18 +654,24 @@ class MainWindow(QMainWindow):
 
         # Top toolbar for quick actions
         tool_bar = QWidget()
+        tool_bar.setObjectName('topToolbar')
         t_layout = QHBoxLayout(tool_bar)
         t_layout.setContentsMargins(0, 0, 0, 0)
+        t_layout.setSpacing(8)
         btn_load = QPushButton('Load Mock')
         btn_clear = QPushButton('Clear Scene')
         btn_save = QPushButton('Save')
+        btn_undo = QPushButton('Undo')
+        btn_redo = QPushButton('Redo')
         btn_zoom_out = QPushButton('-')
         btn_zoom_in = QPushButton('+')
         btn_fit = QPushButton('Fit')
-        btn_debug = QPushButton('Toggle Debug')
+        btn_debug = QPushButton('Debug')
         t_layout.addWidget(btn_load)
         t_layout.addWidget(btn_clear)
         t_layout.addWidget(btn_save)
+        t_layout.addWidget(btn_undo)
+        t_layout.addWidget(btn_redo)
         t_layout.addStretch()
         t_layout.addWidget(btn_zoom_out)
         t_layout.addWidget(btn_zoom_in)
@@ -645,23 +680,32 @@ class MainWindow(QMainWindow):
         c_layout.addWidget(tool_bar)
 
         self.view = GraphicsView(self.scene)
+        self.view.setObjectName('canvasView')
+        self.view.setStyleSheet('background: #17212b; border: 1px solid #354154; border-radius: 10px;')
         c_layout.addWidget(self.view)
-        canvas.setStyleSheet('background:#0b1220; border: 2px solid #334155; border-radius:4px;')
+        canvas.setStyleSheet('background:#13222f; border: 1px solid #2a3a50; border-radius:12px;')
         layout.addWidget(canvas, 1)
         
         # Details panel on the right
         details = QWidget()
+        details.setObjectName('detailsPanel')
+        details.setFixedWidth(320)
         details.setFixedWidth(300)
         d_layout = QFormLayout(details)
         d_layout.setLabelAlignment(Qt.AlignRight)
+        d_layout.setFormAlignment(Qt.AlignHCenter | Qt.AlignTop)
+        d_layout.setContentsMargins(16, 16, 16, 16)
+        d_layout.setSpacing(14)
         self.detail_id = QLineEdit()
         self.detail_id.setReadOnly(True)
         self.detail_name = QLineEdit()
         self.detail_ip = QLineEdit()
         self.detail_subnet = QLineEdit()
         self.detail_description = QLineEdit()
+        self.detail_description.setMinimumHeight(30)
         self.detail_ports = QSpinBox()
         self.detail_ports.setRange(0, 256)
+        self.detail_ports.setButtonSymbols(QSpinBox.PlusMinus)
         self.detail_source = QLineEdit()
         self.detail_source.setReadOnly(True)
 
@@ -674,6 +718,7 @@ class MainWindow(QMainWindow):
         d_layout.addRow('Description:', self.detail_description)
 
         layout.addWidget(details)
+        details.setStyleSheet('background:#1f2a34; border:1px solid #3b4b5c; border-radius:14px;')
 
         # selection/state
         self.selected_node = None
@@ -690,15 +735,71 @@ class MainWindow(QMainWindow):
         btn_load.clicked.connect(self.load_mock_devices)
         btn_clear.clicked.connect(self._clear_scene)
         btn_save.clicked.connect(self.save_state)
+        btn_undo.clicked.connect(self.undo)
+        btn_redo.clicked.connect(self.redo)
         btn_zoom_in.clicked.connect(lambda: self.view.scale(1.2, 1.2))
         btn_zoom_out.clicked.connect(lambda: self.view.scale(1 / 1.2, 1 / 1.2))
         btn_fit.clicked.connect(lambda: self.view.fitInView(self.scene.frame, Qt.KeepAspectRatio) if self.scene.frame is not None else None)
         btn_debug.clicked.connect(lambda: self.debug_checkbox.setChecked(not self.debug_checkbox.isChecked()))
+        self._undo_button = btn_undo
+        self._redo_button = btn_redo
 
         self.setCentralWidget(container)
+        container.setStyleSheet('''
+            QWidget#sidebar {
+                background: #1d2a35;
+                border: 1px solid #364552;
+                border-radius: 16px;
+            }
+            QWidget#detailsPanel {
+                background: #1c2834;
+                border: 1px solid #364552;
+                border-radius: 16px;
+            }
+            QWidget#topToolbar {
+                background: transparent;
+            }
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3e5b61, stop:1 #2f4a50);
+                color: #e7ecef;
+                border: 1px solid #47656e;
+                border-radius: 10px;
+                padding: 8px 12px;
+                min-width: 70px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #517278, stop:1 #3f5e66);
+            }
+            QPushButton:pressed {
+                background: #2d4e55;
+            }
+            QListWidget {
+                background: #1c2b35;
+                border: 1px solid #35607a;
+                border-radius: 12px;
+                color: #e7ecef;
+                padding: 8px;
+            }
+            QLineEdit, QSpinBox {
+                background: #1f2f3b;
+                border: 1px solid #3f5662;
+                border-radius: 10px;
+                color: #e7ecef;
+                padding: 8px;
+            }
+            QLabel {
+                color: #cdd6df;
+                font-size: 13px;
+            }
+            QCheckBox {
+                color: #cdd6df;
+            }
+        ''')
 
         self.state_file = os.path.join(os.path.dirname(__file__), 'scene_state.json')
         self.load_state()
+        if self.scene.nodes:
+            self.push_history_state()
         # If no saved state, populate the scene with mock devices for convenience
         if not self.scene.nodes:
             try:
@@ -709,8 +810,125 @@ class MainWindow(QMainWindow):
     def _on_debug_changed(self, state):
         self.scene.debug_mode = bool(state)
 
+    def _capture_scene_state(self):
+        data = {'nodes': [], 'connections': []}
+        for n in self.scene.nodes:
+            p = n.pos()
+            data['nodes'].append({
+                'id': n.id,
+                'name': n.name,
+                'x': p.x(),
+                'y': p.y(),
+                'ports': n.ports,
+                'ip': n.ip,
+                'subnet': n.subnet,
+                'description': n.description,
+                'source_id': getattr(n, 'source_id', None),
+            })
+        for c in self.scene.connections:
+            def refdict(ref):
+                if isinstance(ref, tuple):
+                    node, port = ref
+                    return {'id': node.id, 'port': port}
+                else:
+                    return {'id': ref.id}
+            data['connections'].append({
+                'start': refdict(c.start_ref),
+                'end': refdict(c.end_ref),
+                'color': c.line.pen().color().name(),
+            })
+        return json.dumps(data)
+
+    def push_history_state(self):
+        if self._history_suppress:
+            return
+        if self._history_index < len(self._history) - 1:
+            self._history = self._history[:self._history_index + 1]
+        self._history.append(self._capture_scene_state())
+        self._history_index = len(self._history) - 1
+        self._update_undo_redo_buttons()
+
+    def _update_undo_redo_buttons(self):
+        if hasattr(self, '_undo_button'):
+            self._undo_button.setEnabled(self._history_index > 0)
+        if hasattr(self, '_redo_button'):
+            self._redo_button.setEnabled(self._history_index < len(self._history) - 1)
+
+    def undo(self):
+        if self._history_index <= 0:
+            return
+        self._history_index -= 1
+        self._restore_scene_state(self._history[self._history_index])
+        self._update_undo_redo_buttons()
+
+    def redo(self):
+        if self._history_index >= len(self._history) - 1:
+            return
+        self._history_index += 1
+        self._restore_scene_state(self._history[self._history_index])
+        self._update_undo_redo_buttons()
+
+    def _restore_scene_state(self, state_json):
+        try:
+            data = json.loads(state_json)
+        except Exception:
+            return
+        self._history_suppress = True
+        # clear existing scene items
+        for c in list(self.scene.connections):
+            try:
+                self.scene.removeItem(c.line)
+            except Exception:
+                pass
+        self.scene.connections.clear()
+        for n in list(self.scene.nodes):
+            try:
+                self.scene.removeItem(n)
+            except Exception:
+                pass
+        self.scene.nodes.clear()
+        id_map = {}
+        for nd in data.get('nodes', []):
+            self.scene.last_click_pos = QPointF(nd.get('x', 0), nd.get('y', 0))
+            node = self.scene.add_device(nd.get('name', 'Server'), node_id=nd.get('id'))
+            node.set_ports(nd.get('ports', 0) or 0)
+            node.set_ip(nd.get('ip'))
+            node.set_subnet(nd.get('subnet'))
+            node.set_description(nd.get('description'))
+            node.source_id = nd.get('source_id')
+            id_map[nd.get('id')] = node
+        for cd in data.get('connections', []):
+            s = cd.get('start') or {}
+            e = cd.get('end') or {}
+            if isinstance(s, dict):
+                s_id = s.get('id'); s_port = s.get('port')
+            else:
+                s_id = s; s_port = None
+            if isinstance(e, dict):
+                e_id = e.get('id'); e_port = e.get('port')
+            else:
+                e_id = e; e_port = None
+            s_node = id_map.get(s_id)
+            e_node = id_map.get(e_id)
+            if s_node and e_node:
+                start_ref = (s_node, s_port) if s_port is not None else s_node
+                end_ref = (e_node, e_port) if e_port is not None else e_node
+                conn = Connection(self.scene, start_ref, end_ref, QColor(cd.get('color', '#00ff00')))
+                if isinstance(start_ref, tuple):
+                    start_ref[0].connections.append(conn)
+                else:
+                    start_ref.connections.append(conn)
+                if isinstance(end_ref, tuple):
+                    end_ref[0].connections.append(conn)
+                else:
+                    end_ref.connections.append(conn)
+                self.scene.connections.append(conn)
+        self._history_suppress = False
+        self._on_selection_changed()
+
     def load_mock_devices(self):
         """Populate the scene with entries from MOCK_DB for quick testing."""
+        self._history_suppress = True
         # Simple grid placement
         x = -240
         y = -160
@@ -730,6 +948,8 @@ class MainWindow(QMainWindow):
                 if x > max_x:
                     x = -240
                     y += dy
+        self._history_suppress = False
+        self.push_history_state()
 
     def _clear_scene(self):
         """Remove all devices and connections from the scene."""
@@ -747,6 +967,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self.scene.nodes.clear()
+        self.push_history_state()
 
     def _on_selection_changed(self):
         items = [it for it in self.scene.selectedItems() if isinstance(it, DeviceNode)]
@@ -794,6 +1015,7 @@ class MainWindow(QMainWindow):
         ports = int(self.detail_ports.value() or 0)
         if ports != node.ports:
             node.set_ports(ports)
+        self.push_history_state()
 
     def add_selected_device(self):
         item = self.device_list.currentItem()
@@ -925,6 +1147,7 @@ class MainWindow(QMainWindow):
                 data = json.load(f)
         except Exception:
             return
+        self._history_suppress = True
         # clear
         for c in list(self.scene.connections):
             try:
@@ -977,6 +1200,7 @@ class MainWindow(QMainWindow):
                 else:
                     end_ref.connections.append(conn)
                 self.scene.connections.append(conn)
+        self._history_suppress = False
 
 
 if __name__ == '__main__':
