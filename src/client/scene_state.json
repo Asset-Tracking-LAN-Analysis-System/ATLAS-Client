@@ -1,4 +1,60 @@
 {
-  "nodes": [],
+  "nodes": [
+    {
+      "id": "r1",
+      "name": "Router",
+      "x": -298.0,
+      "y": -220.0,
+      "ports": 4,
+      "ip": "10.0.0.1",
+      "subnet": "255.255.255.0",
+      "description": "Office edge router",
+      "source_id": "r1"
+    },
+    {
+      "id": "r2",
+      "name": "Router",
+      "x": -71.0,
+      "y": -230.0,
+      "ports": 8,
+      "ip": "10.0.0.2",
+      "subnet": "255.255.255.0",
+      "description": "Backup router",
+      "source_id": "r2"
+    },
+    {
+      "id": "sw1",
+      "name": "Switch",
+      "x": -74.0,
+      "y": 25.0,
+      "ports": 48,
+      "ip": "10.0.1.1",
+      "subnet": "255.255.255.0",
+      "description": "Main distribution switch",
+      "source_id": "sw1"
+    },
+    {
+      "id": "sw2",
+      "name": "Switch",
+      "x": 86.0,
+      "y": -87.0,
+      "ports": 28,
+      "ip": "10.0.1.2",
+      "subnet": "255.255.255.0",
+      "description": "Secondaryeeee access switch",
+      "source_id": "sw2"
+    },
+    {
+      "id": "srv1",
+      "name": "Server",
+      "x": -303.0,
+      "y": 18.0,
+      "ports": 2,
+      "ip": "10.0.2.10",
+      "subnet": "255.255.255.0",
+      "description": "Application server",
+      "source_id": "srv1"
+    }
+  ],
   "connections": []
 }

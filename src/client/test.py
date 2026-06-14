@@ -4,7 +4,8 @@ import json
 import uuid
 
 from PySide6.QtCore import Qt, QPointF
-from PySide6.QtGui import QColor, QBrush, QPen, QAction, QPixmap, QPainter
+from PySide6.QtGui import QColor, QBrush, QPen, QAction, QPixmap, QPainter, QTransform
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
     QGraphicsEllipseItem,
@@ -25,27 +26,67 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QInputDialog,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QLineEdit,
+    QSpinBox,
     QCheckBox,
 )
+
+try:
+    from data_handler.api_handler import api_handler
+except Exception:
+    api_handler = None
 
 # Simple mock DB — replace with real API via get_devices_for_type
 MOCK_DB = {
     'Router': [
-        {'id': 'r1', 'ip': '10.0.0.1', 'ports': 4},
-        {'id': 'r2', 'ip': '10.0.0.2', 'ports': 8},
+        {'id': 'r1', 'ip': '10.0.0.1', 'ports': 4, 'subnet': '255.255.255.0', 'description': 'Office edge router'},
+        {'id': 'r2', 'ip': '10.0.0.2', 'ports': 8, 'subnet': '255.255.255.0', 'description': 'Backup router'},
     ],
     'Switch': [
-        {'id': 'sw1', 'ip': '10.0.1.1', 'ports': 48},
-        {'id': 'sw2', 'ip': '10.0.1.2', 'ports': 24},
+        {'id': 'sw1', 'ip': '10.0.1.1', 'ports': 48, 'subnet': '255.255.255.0', 'description': 'Main distribution switch'},
+        {'id': 'sw2', 'ip': '10.0.1.2', 'ports': 24, 'subnet': '255.255.255.0', 'description': 'Secondary access switch'},
     ],
     'Server': [
-        {'id': 'srv1', 'ip': '10.0.2.10', 'ports': 2},
+        {'id': 'srv1', 'ip': '10.0.2.10', 'ports': 2, 'subnet': '255.255.255.0', 'description': 'Application server'},
     ],
 }
 
 
+def _load_db_entries():
+    if api_handler is None:
+        return []
+    try:
+        client = api_handler()
+        data = client.fetch_data()
+        if isinstance(data, dict):
+            return data.get('data') or data.get('entities') or []
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+    return []
+
+
 def get_devices_for_type(device_type):
-    """Pluggable adapter: return list of dicts with keys id, ip, ports."""
+    """Pluggable adapter: return list of dicts with keys id, ip, ports, subnet, description."""
+    device_type = str(device_type or '').strip()
+    if api_handler is not None:
+        results = []
+        for entry in _load_db_entries():
+            if str(entry.get('type', '')).lower() == device_type.lower():
+                results.append({
+                    'id': entry.get('id'),
+                    'ip': entry.get('ip'),
+                    'ports': int(entry.get('ports') or 0),
+                    'subnet': entry.get('subnet'),
+                    'description': entry.get('description'),
+                })
+        if results:
+            return results
+        return MOCK_DB.get(device_type, [])
     return MOCK_DB.get(device_type, [])
 
 
@@ -102,6 +143,7 @@ class PortItem(QGraphicsEllipseItem):
         self.setBrush(QBrush(QColor('#94a3b8')))
         self.setPen(QPen(QColor('#111827')))
         self.setAcceptHoverEvents(True)
+        self.setAcceptedMouseButtons(Qt.AllButtons)
 
         # small label (1-based)
         self.label = QGraphicsTextItem(str(index + 1), self)
@@ -131,6 +173,16 @@ class PortItem(QGraphicsEllipseItem):
         if hasattr(scene, 'port_clicked'):
             scene.port_clicked(self.node, self.port_index)
         event.accept()
+
+    def contextMenuEvent(self, event):
+        # Forward context menu to the parent DeviceNode so right-click works
+        try:
+            if hasattr(self, 'node') and self.node is not None:
+                self.node.contextMenuEvent(event)
+                return
+        except Exception:
+            pass
+        return super().contextMenuEvent(event)
 
     def set_connected(self, connected=True):
         if connected:
@@ -196,6 +248,10 @@ class DeviceNode(QGraphicsEllipseItem):
         self.connections = []
         self.source_id = None
         self.ip = None
+        self.subnet = None
+        self.description = None
+        self.info_label = None
+        self.description_label = None
 
         images_dir = os.path.join(os.path.dirname(__file__), 'images')
         specific = os.path.join(images_dir, f"{name.lower()}.png")
@@ -217,6 +273,8 @@ class DeviceNode(QGraphicsEllipseItem):
 
         self.setPen(QPen(QColor('#ffffff'), 2))
         self.setFlags(QGraphicsEllipseItem.ItemIsMovable | QGraphicsEllipseItem.ItemIsSelectable | QGraphicsEllipseItem.ItemSendsScenePositionChanges)
+        self.setAcceptedMouseButtons(Qt.AllButtons)
+        self.setAcceptHoverEvents(True)
         self.setPos(x, y)
 
         self.title = QGraphicsTextItem(name, self)
@@ -256,16 +314,94 @@ class DeviceNode(QGraphicsEllipseItem):
         self.ports = ports or 0
         self._create_ports(self.ports)
 
-    def set_ip(self, ip):
-        self.ip = ip
+    def _update_info_label(self):
         try:
-            if self.ip_label and self.ip_label.scene() is not None:
-                self.scene().removeItem(self.ip_label)
+            if self.info_label and self.info_label.scene() is not None:
+                self.scene().removeItem(self.info_label)
         except Exception:
             pass
-        self.ip_label = QGraphicsTextItem(str(ip), self)
-        self.ip_label.setDefaultTextColor(Qt.lightGray)
-        self.ip_label.setPos(-30, 58)
+        self.info_label = None
+
+        text = ''
+        if self.ip:
+            text = str(self.ip)
+        if self.subnet:
+            text = f"{text} / {self.subnet}" if text else str(self.subnet)
+        if text:
+            self.info_label = QGraphicsTextItem(text, self)
+            self.info_label.setDefaultTextColor(Qt.lightGray)
+            self.info_label.setPos(-30, 58)
+
+    def _update_description_label(self):
+        try:
+            if self.description_label and self.description_label.scene() is not None:
+                self.scene().removeItem(self.description_label)
+        except Exception:
+            pass
+        self.description_label = None
+        if self.description:
+            self.description_label = QGraphicsTextItem(str(self.description), self)
+            self.description_label.setDefaultTextColor(Qt.lightGray)
+            font = QFont()
+            font.setPointSize(8)
+            self.description_label.setFont(font)
+            self.description_label.setPos(-30, -58)
+
+    def set_ip(self, ip):
+        self.ip = str(ip).strip() if ip else None
+        self._update_info_label()
+
+    def set_subnet(self, subnet):
+        self.subnet = str(subnet).strip() if subnet else None
+        self._update_info_label()
+
+    def set_description(self, description):
+        self.description = str(description).strip() if description else None
+        self._update_description_label()
+
+    def refresh_from_db(self):
+        if not self.source_id:
+            return
+        entries = get_devices_for_type(self.name)
+        for entry in entries:
+            if entry.get('id') == self.source_id:
+                self.set_ip(entry.get('ip'))
+                self.set_subnet(entry.get('subnet'))
+                self.set_description(entry.get('description'))
+                self.set_ports(entry.get('ports', 0))
+                return
+
+    def edit_properties(self):
+        dialog = QDialog()
+        dialog.setWindowTitle(f"Edit {self.name} properties")
+        layout = QFormLayout(dialog)
+
+        ip_edit = QLineEdit(self.ip or '')
+        subnet_edit = QLineEdit(self.subnet or '')
+        description_edit = QLineEdit(self.description or '')
+        ports_edit = QSpinBox()
+        ports_edit.setRange(0, 256)
+        ports_edit.setValue(self.ports or 0)
+
+        layout.addRow('IP address:', ip_edit)
+        layout.addRow('Subnet:', subnet_edit)
+        layout.addRow('Description:', description_edit)
+        layout.addRow('Port count:', ports_edit)
+        if self.source_id:
+            source_label = QLineEdit(str(self.source_id))
+            source_label.setReadOnly(True)
+            layout.addRow('Source ID:', source_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+
+        if dialog.exec() == QDialog.Accepted:
+            self.set_ip(ip_edit.text().strip() or None)
+            self.set_subnet(subnet_edit.text().strip() or None)
+            self.set_description(description_edit.text().strip() or None)
+            self.set_ports(ports_edit.value())
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemPositionHasChanged:
@@ -315,9 +451,14 @@ class DeviceNode(QGraphicsEllipseItem):
             return
         menu = QMenu()
         assign = QAction('Assign from DB')
+        refresh = QAction('Refresh from DB')
+        edit = QAction('Edit properties')
         clear = QAction('Clear assignment')
         menu.addAction(assign)
+        menu.addAction(refresh)
+        menu.addAction(edit)
         menu.addAction(clear)
+        refresh.setEnabled(bool(self.source_id))
         act = menu.exec(event.screenPos())
         if act == assign:
             entries = get_devices_for_type(self.name)
@@ -329,15 +470,16 @@ class DeviceNode(QGraphicsEllipseItem):
                 idx = items.index(choice)
                 e = entries[idx]
                 self.set_ip(e.get('ip'))
+                self.set_subnet(e.get('subnet'))
+                self.set_description(e.get('description'))
                 self.set_ports(e.get('ports', 0))
                 self.source_id = e.get('id')
+        elif act == refresh:
+            self.refresh_from_db()
+        elif act == edit:
+            self.edit_properties()
         elif act == clear:
-            try:
-                if self.ip_label and self.ip_label.scene() is not None:
-                    self.scene().removeItem(self.ip_label)
-            except Exception:
-                pass
-            self.ip = None
+            self.set_ip(None)
             self.source_id = None
             self.set_ports(0)
 
@@ -362,6 +504,23 @@ class NetworkScene(QGraphicsScene):
         rect.setZValue(-1)
         self.addItem(rect)
         self.frame = rect
+
+    def _select_device_type(self, parent=None):
+        types = ['Router', 'Switch', 'Server', 'Firewall']
+        choice, ok = QInputDialog.getItem(parent, 'Select device type', 'Device type:', types, 0, False)
+        return choice if ok else None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            item = self.itemAt(event.scenePos(), QTransform())
+            if item is None or item is self.frame:
+                self.last_click_pos = event.scenePos()
+                choice = self._select_device_type(self.views()[0] if self.views() else None)
+                if choice:
+                    self.add_device(choice)
+                    event.accept()
+                    return
+        super().mousePressEvent(event)
 
     def add_device(self, dtype, node_id=None):
         pos = self.last_click_pos
@@ -463,18 +622,178 @@ class MainWindow(QMainWindow):
         canvas = QWidget()
         c_layout = QVBoxLayout(canvas)
         c_layout.setContentsMargins(8, 8, 8, 8)
+
+        # Top toolbar for quick actions
+        tool_bar = QWidget()
+        t_layout = QHBoxLayout(tool_bar)
+        t_layout.setContentsMargins(0, 0, 0, 0)
+        btn_load = QPushButton('Load Mock')
+        btn_clear = QPushButton('Clear Scene')
+        btn_save = QPushButton('Save')
+        btn_zoom_out = QPushButton('-')
+        btn_zoom_in = QPushButton('+')
+        btn_fit = QPushButton('Fit')
+        btn_debug = QPushButton('Toggle Debug')
+        t_layout.addWidget(btn_load)
+        t_layout.addWidget(btn_clear)
+        t_layout.addWidget(btn_save)
+        t_layout.addStretch()
+        t_layout.addWidget(btn_zoom_out)
+        t_layout.addWidget(btn_zoom_in)
+        t_layout.addWidget(btn_fit)
+        t_layout.addWidget(btn_debug)
+        c_layout.addWidget(tool_bar)
+
         self.view = GraphicsView(self.scene)
         c_layout.addWidget(self.view)
         canvas.setStyleSheet('background:#0b1220; border: 2px solid #334155; border-radius:4px;')
         layout.addWidget(canvas, 1)
+        
+        # Details panel on the right
+        details = QWidget()
+        details.setFixedWidth(300)
+        d_layout = QFormLayout(details)
+        d_layout.setLabelAlignment(Qt.AlignRight)
+        self.detail_id = QLineEdit()
+        self.detail_id.setReadOnly(True)
+        self.detail_name = QLineEdit()
+        self.detail_ip = QLineEdit()
+        self.detail_subnet = QLineEdit()
+        self.detail_description = QLineEdit()
+        self.detail_ports = QSpinBox()
+        self.detail_ports.setRange(0, 256)
+        self.detail_source = QLineEdit()
+        self.detail_source.setReadOnly(True)
+
+        d_layout.addRow('ID:', self.detail_id)
+        d_layout.addRow('Type / Name:', self.detail_name)
+        d_layout.addRow('IP:', self.detail_ip)
+        d_layout.addRow('Subnet:', self.detail_subnet)
+        d_layout.addRow('Ports:', self.detail_ports)
+        d_layout.addRow('Source ID:', self.detail_source)
+        d_layout.addRow('Description:', self.detail_description)
+
+        layout.addWidget(details)
+
+        # selection/state
+        self.selected_node = None
+        self.scene.selectionChanged.connect(self._on_selection_changed)
+
+        # wire detail edits
+        self.detail_name.editingFinished.connect(self._apply_details_to_node)
+        self.detail_ip.editingFinished.connect(self._apply_details_to_node)
+        self.detail_subnet.editingFinished.connect(self._apply_details_to_node)
+        self.detail_description.editingFinished.connect(self._apply_details_to_node)
+        self.detail_ports.valueChanged.connect(self._apply_details_to_node)
+
+        # connect toolbar actions
+        btn_load.clicked.connect(self.load_mock_devices)
+        btn_clear.clicked.connect(self._clear_scene)
+        btn_save.clicked.connect(self.save_state)
+        btn_zoom_in.clicked.connect(lambda: self.view.scale(1.2, 1.2))
+        btn_zoom_out.clicked.connect(lambda: self.view.scale(1 / 1.2, 1 / 1.2))
+        btn_fit.clicked.connect(lambda: self.view.fitInView(self.scene.frame, Qt.KeepAspectRatio) if self.scene.frame is not None else None)
+        btn_debug.clicked.connect(lambda: self.debug_checkbox.setChecked(not self.debug_checkbox.isChecked()))
 
         self.setCentralWidget(container)
 
         self.state_file = os.path.join(os.path.dirname(__file__), 'scene_state.json')
         self.load_state()
+        # If no saved state, populate the scene with mock devices for convenience
+        if not self.scene.nodes:
+            try:
+                self.load_mock_devices()
+            except Exception:
+                pass
 
     def _on_debug_changed(self, state):
         self.scene.debug_mode = bool(state)
+
+    def load_mock_devices(self):
+        """Populate the scene with entries from MOCK_DB for quick testing."""
+        # Simple grid placement
+        x = -240
+        y = -160
+        dx = 200
+        dy = 140
+        max_x = 480
+        for dtype, entries in MOCK_DB.items():
+            for e in entries:
+                self.scene.last_click_pos = QPointF(x, y)
+                n = self.scene.add_device(dtype, node_id=e.get('id'))
+                n.set_ports(e.get('ports', 0))
+                n.set_ip(e.get('ip'))
+                n.set_subnet(e.get('subnet'))
+                n.set_description(e.get('description'))
+                n.source_id = e.get('id')
+                x += dx
+                if x > max_x:
+                    x = -240
+                    y += dy
+
+    def _clear_scene(self):
+        """Remove all devices and connections from the scene."""
+        # remove connection lines
+        for c in list(self.scene.connections):
+            try:
+                self.scene.removeItem(c.line)
+            except Exception:
+                pass
+        self.scene.connections.clear()
+        # remove nodes
+        for n in list(self.scene.nodes):
+            try:
+                self.scene.removeItem(n)
+            except Exception:
+                pass
+        self.scene.nodes.clear()
+
+    def _on_selection_changed(self):
+        items = [it for it in self.scene.selectedItems() if isinstance(it, DeviceNode)]
+        if not items:
+            self.selected_node = None
+            self._clear_details()
+            return
+        node = items[0]
+        self.selected_node = node
+        # populate detail fields
+        self.detail_id.setText(str(node.id))
+        self.detail_name.setText(str(node.name))
+        self.detail_ip.setText(str(node.ip) if node.ip else '')
+        self.detail_subnet.setText(str(node.subnet) if node.subnet else '')
+        self.detail_description.setText(str(node.description) if node.description else '')
+        self.detail_ports.setValue(int(node.ports or 0))
+        self.detail_source.setText(str(node.source_id) if node.source_id else '')
+
+    def _clear_details(self):
+        self.detail_id.clear()
+        self.detail_name.clear()
+        self.detail_ip.clear()
+        self.detail_subnet.clear()
+        self.detail_description.clear()
+        self.detail_ports.setValue(0)
+        self.detail_source.clear()
+
+    def _apply_details_to_node(self, *args):
+        if not self.selected_node:
+            return
+        node = self.selected_node
+        name = self.detail_name.text().strip()
+        if name and name != node.name:
+            node.name = name
+            try:
+                node.title.setPlainText(name)
+            except Exception:
+                pass
+        ip = self.detail_ip.text().strip()
+        node.set_ip(ip or None)
+        subnet = self.detail_subnet.text().strip()
+        node.set_subnet(subnet or None)
+        desc = self.detail_description.text().strip()
+        node.set_description(desc or None)
+        ports = int(self.detail_ports.value() or 0)
+        if ports != node.ports:
+            node.set_ports(ports)
 
     def add_selected_device(self):
         item = self.device_list.currentItem()
@@ -573,7 +892,17 @@ class MainWindow(QMainWindow):
         data = {'nodes': [], 'connections': []}
         for n in self.scene.nodes:
             p = n.pos()
-            data['nodes'].append({'id': n.id, 'name': n.name, 'x': p.x(), 'y': p.y(), 'ports': n.ports, 'ip': n.ip, 'source_id': getattr(n, 'source_id', None)})
+            data['nodes'].append({
+                'id': n.id,
+                'name': n.name,
+                'x': p.x(),
+                'y': p.y(),
+                'ports': n.ports,
+                'ip': n.ip,
+                'subnet': n.subnet,
+                'description': n.description,
+                'source_id': getattr(n, 'source_id', None),
+            })
         for c in self.scene.connections:
             def refdict(ref):
                 if isinstance(ref, tuple):
@@ -616,6 +945,10 @@ class MainWindow(QMainWindow):
             node.set_ports(nd.get('ports', 0) or 0)
             if nd.get('ip'):
                 node.set_ip(nd.get('ip'))
+            if nd.get('subnet'):
+                node.set_subnet(nd.get('subnet'))
+            if nd.get('description'):
+                node.set_description(nd.get('description'))
             node.source_id = nd.get('source_id')
             id_map[nd.get('id')] = node
         for cd in data.get('connections', []):
