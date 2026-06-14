@@ -32,12 +32,12 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QSpinBox,
     QCheckBox,
+    QComboBox,
 )
 
-try:
-    from data_handler.api_handler import api_handler
-except Exception:
-    api_handler = None
+
+from data_handler.api_handler import api_handler
+
 
 # Simple mock DB — replace with real API via get_devices_for_type
 MOCK_DB = {
@@ -60,14 +60,30 @@ def _load_db_entries():
         return []
     try:
         client = api_handler()
-        data = client.fetch_data()
-        if isinstance(data, dict):
-            return data.get('data') or data.get('entities') or []
-        if isinstance(data, list):
-            return data
+        return client.fetch_data() or []
     except Exception:
         pass
     return []
+
+
+def get_db_device_entries():
+    if api_handler is None:
+        return []
+    try:
+        client = api_handler()
+        return client.fetch_data() or []
+    except Exception:
+        return []
+
+
+def get_db_device_types():
+    if api_handler is None:
+        return []
+    try:
+        client = api_handler()
+        return client.fetch_types() or []
+    except Exception:
+        return []
 
 
 def get_devices_for_type(device_type):
@@ -76,7 +92,11 @@ def get_devices_for_type(device_type):
     if api_handler is not None:
         results = []
         for entry in _load_db_entries():
-            if str(entry.get('type', '')).lower() == device_type.lower():
+            if (
+                str(entry.get('type', '')).lower() == device_type.lower()
+                or str(entry.get('name', '')).lower() == device_type.lower()
+                or str(entry.get('id', '')).lower() == device_type.lower()
+            ):
                 results.append({
                     'id': entry.get('id'),
                     'ip': entry.get('ip'),
@@ -631,10 +651,15 @@ class MainWindow(QMainWindow):
         title.setStyleSheet('font-size: 16px; font-weight: bold; color: #f8fafc;')
         s_layout.addWidget(title)
 
-        self.device_list = QListWidget()
-        for t in ['Router', 'Switch', 'Server', 'Firewall']:
-            self.device_list.addItem(QListWidgetItem(t))
-        s_layout.addWidget(self.device_list)
+        self.device_selector = QComboBox()
+        self.device_selector.setEditable(False)
+        self.device_selector.setInsertPolicy(QComboBox.NoInsert)
+        self.device_selector.addItem('Loading DB devices...')
+        s_layout.addWidget(self.device_selector)
+
+        refresh_btn = QPushButton('Refresh DB')
+        refresh_btn.clicked.connect(self.load_db_devices)
+        s_layout.addWidget(refresh_btn)
 
         add_btn = QPushButton('Add Selected')
         add_btn.clicked.connect(self.add_selected_device)
@@ -722,7 +747,10 @@ class MainWindow(QMainWindow):
 
         # selection/state
         self.selected_node = None
+        self._db_devices = []
         self.scene.selectionChanged.connect(self._on_selection_changed)
+
+        self.load_db_devices()
 
         # wire detail edits
         self.detail_name.editingFinished.connect(self._apply_details_to_node)
@@ -995,6 +1023,31 @@ class MainWindow(QMainWindow):
         self.detail_ports.setValue(0)
         self.detail_source.clear()
 
+    def load_db_devices(self):
+        self._db_devices = []
+        self.device_selector.clear()
+        if api_handler is None:
+            self.device_selector.addItem('Database unavailable')
+            self.device_selector.setEnabled(False)
+            return
+
+        self.device_selector.setEnabled(True)
+        try:
+            entries = get_db_device_entries()
+        except Exception:
+            entries = []
+
+        if not entries:
+            self.device_selector.addItem('No DB devices found')
+            self.device_selector.setEnabled(False)
+            return
+
+        self._db_devices = entries
+        for entry in entries:
+            label = entry.get('name') or entry.get('id')
+            entry_id = entry.get('id')
+            self.device_selector.addItem(f"{label} ({entry_id})")
+
     def _apply_details_to_node(self, *args):
         if not self.selected_node:
             return
@@ -1018,12 +1071,28 @@ class MainWindow(QMainWindow):
         self.push_history_state()
 
     def add_selected_device(self):
-        item = self.device_list.currentItem()
-        if not item:
+        if not self._db_devices:
             return
+        index = self.device_selector.currentIndex()
+        if index < 0 or index >= len(self._db_devices):
+            return
+        entry = self._db_devices[index]
+        name = entry.get('name') or entry.get('id')
         center = self.view.mapToScene(self.view.viewport().rect().center())
         self.scene.last_click_pos = center
-        node = self.scene.add_device(item.text())
+        node = self.scene.add_device(name)
+        node.source_id = entry.get('id')
+        if entry.get('ip'):
+            node.set_ip(entry.get('ip'))
+        if entry.get('subnet'):
+            node.set_subnet(entry.get('subnet'))
+        if entry.get('description'):
+            node.set_description(entry.get('description'))
+        if entry.get('ports') is not None:
+            try:
+                node.set_ports(int(entry.get('ports') or 0))
+            except Exception:
+                pass
         if node.ports > 24:
             node.setScale(0.9)
 
