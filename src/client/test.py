@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 
 
 from data_handler.api_handler import api_handler
+from data_handler.atlas_api import AtlasApi
 
 
 # Simple mock DB — replace with real API via get_devices_for_type
@@ -89,24 +90,107 @@ def get_db_device_types():
 def get_devices_for_type(device_type):
     """Pluggable adapter: return list of dicts with keys id, ip, ports, subnet, description."""
     device_type = str(device_type or '').strip()
-    if api_handler is not None:
+    # Try to use Atlas API to enrich device data (ip addresses and port counts).
+    try:
+        # load API host/port from local config
+        cfg_path = os.path.join(os.path.dirname(__file__), 'config.json')
+        host = 'localhost'
+        port = None
+        if os.path.exists(cfg_path):
+            with open(cfg_path, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+                url = str(cfg.get('api_url') or '')
+                # strip protocol if present
+                if url.startswith('http://'):
+                    url = url[len('http://'):]
+                elif url.startswith('https://'):
+                    url = url[len('https://'):]
+                host = url.split(':')[0] if url else host
+                port = int(cfg.get('api_port')) if cfg.get('api_port') else None
+
+        api = AtlasApi()
+        if port:
+            api.PORT = int(port)
+
+        entities_resp = api.get_entity_list(host)
+        if hasattr(entities_resp, 'DATA') and entities_resp.DATA:
+            entities = entities_resp.DATA
+        else:
+            return MOCK_DB.get(device_type, [])
+
+        nif_resp = api.get_network_interface_list(host)
+        interfaces = nif_resp.DATA if hasattr(nif_resp, 'DATA') and nif_resp.DATA else []
+        # map entity_id -> first ip
+        iface_map: dict[str, str] = {}
+        for nif in interfaces:
+            try:
+                if nif.ENTITY_ID and nif.IP_ADDRESS:
+                    iface_map.setdefault(nif.ENTITY_ID, nif.IP_ADDRESS)
+            except Exception:
+                continue
+
+        prop_resp = api.get_property_list(host)
+        props = prop_resp.DATA if hasattr(prop_resp, 'DATA') and prop_resp.DATA else []
+        prop_name_by_id = {p.ID: p.NAME.lower() for p in (props or []) if getattr(p, 'ID', None) is not None}
+
+        ent_prop_resp = api.get_entity_property_list(host)
+        ent_props = ent_prop_resp.DATA if hasattr(ent_prop_resp, 'DATA') and ent_prop_resp.DATA else []
+        # map entity_id -> {prop_name: value}
+        ent_prop_map: dict[str, dict] = {}
+        for ep in (ent_props or []):
+            try:
+                name = prop_name_by_id.get(ep.PROPERTY_ID, str(ep.PROPERTY_ID))
+                ent_prop_map.setdefault(ep.ENTITY_ID, {})[name] = ep.VALUE
+            except Exception:
+                continue
+
         results = []
-        for entry in _load_db_entries():
-            if (
-                str(entry.get('type', '')).lower() == device_type.lower()
-                or str(entry.get('name', '')).lower() == device_type.lower()
-                or str(entry.get('id', '')).lower() == device_type.lower()
-            ):
-                results.append({
-                    'id': entry.get('id'),
-                    'ip': entry.get('ip'),
-                    'ports': int(entry.get('ports') or 0),
-                    'subnet': entry.get('subnet'),
-                    'description': entry.get('description'),
-                })
+        for ent in entities:
+            ename = str(ent.NAME or '')
+            eid = str(ent.ID or '')
+            # match by type name included in entity name (best-effort)
+            if device_type.lower() not in ename.lower():
+                # also allow matching if device_type equals id prefix
+                if not eid.lower().startswith(device_type.lower()):
+                    continue
+
+            # find IP by matching ENTITY_ID in network interfaces
+            ip = ''
+            for nif in interfaces:
+                try:
+                    if str(getattr(nif, 'ENTITY_ID', '')) == eid and getattr(nif, 'IP_ADDRESS', None):
+                        ip = getattr(nif, 'IP_ADDRESS')
+                        break
+                except Exception:
+                    continue
+            ep = ent_prop_map.get(eid, {})
+            # normalize ip to match MOCK_DB shape
+            ip = ip or ep.get('ip') or ''
+            ports = 0
+            # check common property names for ports
+            for k in ['ports', 'port_count', 'port', 'num_ports']:
+                if k in ep:
+                    try:
+                        ports = int(ep[k])
+                    except Exception:
+                        ports = 0
+                    break
+
+            subnet = ep.get('subnet') or ep.get('network') or None
+            results.append({
+                'id': eid,
+                'ip': ip,
+                'ports': int(ports or 0),
+                'subnet': subnet,
+                'description': ename or '',
+            })
+
         if results:
             return results
-        return MOCK_DB.get(device_type, [])
+    except Exception:
+        pass
+
+    # fallback to mock DB
     return MOCK_DB.get(device_type, [])
 
 
@@ -1030,10 +1114,90 @@ class MainWindow(QMainWindow):
             self.device_selector.addItem('Database unavailable')
             self.device_selector.setEnabled(False)
             return
-
+        # Use AtlasApi to fetch all entities and their network interfaces,
+        # then normalize into MOCK_DB-like entries and populate the selector.
         self.device_selector.setEnabled(True)
         try:
-            entries = get_db_device_entries()
+            cfg_path = os.path.join(os.path.dirname(__file__), 'config.json')
+            host = 'localhost'
+            port = None
+            if os.path.exists(cfg_path):
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+                    url = str(cfg.get('api_url') or '')
+                    if url.startswith('http://'):
+                        url = url[len('http://'):]
+                    elif url.startswith('https://'):
+                        url = url[len('https://'):]
+                    host = url.split(':')[0] if url else host
+                    port = int(cfg.get('api_port')) if cfg.get('api_port') else None
+
+            api = AtlasApi()
+            if port:
+                api.PORT = int(port)
+
+            entities_resp = api.get_entity_list(host)
+            nif_resp = api.get_network_interface_list(host)
+            prop_resp = api.get_property_list(host)
+            ent_prop_resp = api.get_entity_property_list(host)
+
+            entities = entities_resp.DATA if hasattr(entities_resp, 'DATA') and entities_resp.DATA else []
+            interfaces = nif_resp.DATA if hasattr(nif_resp, 'DATA') and nif_resp.DATA else []
+            props = prop_resp.DATA if hasattr(prop_resp, 'DATA') and prop_resp.DATA else []
+            ent_props = ent_prop_resp.DATA if hasattr(ent_prop_resp, 'DATA') and ent_prop_resp.DATA else []
+
+            # build prop id -> name map and entity prop map
+            prop_name_by_id = {p.ID: p.NAME.lower() for p in (props or []) if getattr(p, 'ID', None) is not None}
+            ent_prop_map: dict[str, dict] = {}
+            for ep in (ent_props or []):
+                try:
+                    name = prop_name_by_id.get(ep.PROPERTY_ID, str(ep.PROPERTY_ID))
+                    ent_prop_map.setdefault(ep.ENTITY_ID, {})[name] = ep.VALUE
+                except Exception:
+                    continue
+
+            entries = []
+            for ent in (entities or []):
+                try:
+                    eid = str(ent.ID)
+                    name = str(ent.NAME or '')
+                    # find first interface for this entity
+                    ip = ''
+                    for nif in (interfaces or []):
+                        try:
+                            if str(getattr(nif, 'ENTITY_ID', '')) == eid and getattr(nif, 'IP_ADDRESS', None):
+                                ip = getattr(nif, 'IP_ADDRESS')
+                                break
+                        except Exception:
+                            continue
+
+                    ep = ent_prop_map.get(eid, {})
+                    ports = 0
+                    for k in ['ports', 'port_count', 'port', 'num_ports']:
+                        if k in ep:
+                            try:
+                                ports = int(ep[k])
+                            except Exception:
+                                ports = 0
+                            break
+
+                    # heuristic fallback for ports
+                    if not ports:
+                        if 'switch' in name.lower():
+                            ports = 48
+                        else:
+                            ports = 4
+
+                    entry = {
+                        'id': eid,
+                        'ip': ip or '',
+                        'ports': int(ports or 0),
+                        'subnet': ep.get('subnet') or None,
+                        'description': name,
+                    }
+                    entries.append(entry)
+                except Exception:
+                    continue
         except Exception:
             entries = []
 
@@ -1044,9 +1208,7 @@ class MainWindow(QMainWindow):
 
         self._db_devices = entries
         for entry in entries:
-            label = entry.get('name') or entry.get('id')
-            entry_id = entry.get('id')
-            self.device_selector.addItem(f"{label} ({entry_id})")
+            self.device_selector.addItem(f"{entry.get('id')} {entry.get('ip')} ({entry.get('ports')}p)")
 
     def _apply_details_to_node(self, *args):
         if not self.selected_node:

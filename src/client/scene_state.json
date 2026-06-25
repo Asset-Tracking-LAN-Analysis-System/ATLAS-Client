@@ -1,4 +1,71 @@
 {
-  "nodes": [],
+  "nodes": [
+    {
+      "id": "r1",
+      "name": "Router",
+      "x": -240.0,
+      "y": -160.0,
+      "ports": 4,
+      "ip": "10.0.0.1",
+      "subnet": "255.255.255.0",
+      "description": "Office edge router",
+      "source_id": "r1"
+    },
+    {
+      "id": "r2",
+      "name": "Router",
+      "x": -40.0,
+      "y": -160.0,
+      "ports": 8,
+      "ip": "10.0.0.2",
+      "subnet": "255.255.255.0",
+      "description": "Backup router",
+      "source_id": "r2"
+    },
+    {
+      "id": "sw1",
+      "name": "Switch",
+      "x": 160.0,
+      "y": -160.0,
+      "ports": 48,
+      "ip": "10.0.1.1",
+      "subnet": "255.255.255.0",
+      "description": "Main distribution switch",
+      "source_id": "sw1"
+    },
+    {
+      "id": "sw2",
+      "name": "Switch",
+      "x": 360.0,
+      "y": -160.0,
+      "ports": 24,
+      "ip": "10.0.1.2",
+      "subnet": "255.255.255.0",
+      "description": "Secondary access switch",
+      "source_id": "sw2"
+    },
+    {
+      "id": "srv1",
+      "name": "Server",
+      "x": -353.0,
+      "y": -9.0,
+      "ports": 2,
+      "ip": "10.0.2.10",
+      "subnet": "255.255.255.0",
+      "description": "Application server",
+      "source_id": "srv1"
+    },
+    {
+      "id": "badb01aec3f24f598a87f183bf1bb87c",
+      "name": "003-000000",
+      "x": -99.0,
+      "y": 157.0,
+      "ports": 4,
+      "ip": "192.168.734.10",
+      "subnet": null,
+      "description": "Omega",
+      "source_id": "003-000000"
+    }
+  ],
   "connections": []
 }
